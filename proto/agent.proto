@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "github.com/songzhibin97/nexlify/proto;proto";
+
+// 心跳消息
+message HeartbeatRequest {
+  string agent_id = 1;
+  AgentMetadata metadata = 2;
+  int64 timestamp = 3;
+}
+
+message HeartbeatResponse {
+  string server_id = 1;
+  int64 server_time = 2;
+  ConfigUpdate config = 3;
+}
+
+// Agent元数据
+message AgentMetadata {
+  string hostname = 1;
+  string ip = 2;
+  string version = 3;
+  map<string, string> labels = 4;
+  SystemResources resources = 5;
+  repeated string supported_task_types = 6; // 新增：支持的任务类型
+}
+
+// 系统资源信息
+message SystemResources {
+  double cpu_usage = 1;
+  double memory_usage = 2;
+  double disk_usage = 3;
+}
+
+// 配置更新
+message ConfigUpdate {
+  int32 heartbeat_interval = 1;
+  map<string, string> settings = 2;
+}
+
+// 任务定义
+message Task {
+  string task_id = 1;
+  string task_type = 2;
+  int64 create_time = 3;
+  int64 expire_time = 4;
+  TaskParameters parameters = 5;
+  TaskSchedule schedule = 6;
+  int32 timeout_seconds = 7;
+  int32 retry_count = 8;
+  string criticality = 9;  // HIGH, MEDIUM, LOW
+  int32 priority = 10;     // 优先级字段，1-10
+  int32 max_retries = 11;
+}
+
+// 任务参数
+message TaskParameters {
+  map<string, string> params = 1;
+  repeated EncryptedSecret secrets = 2;
+  bytes binary_data = 3;
+}
+
+// 加密的敏感信息
+message EncryptedSecret {
+  string key_id = 1;
+  bytes encrypted_data = 2;
+  string encryption_method = 3;
+}
+
+// 任务调度设置
+message TaskSchedule {
+  string schedule_type = 1;  // IMMEDIATE, CRON, INTERVAL
+  string cron_expression = 2;
+  int32 interval_seconds = 3;
+  int64 scheduled_at = 4;    // 支持单次调度时间
+}
+
+// 任务状态更新
+message TaskStatusUpdate {
+  string task_id = 1;
+  string status = 2;  // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+  int32 progress = 3; // 0-100
+  string message = 4;
+  bytes result = 5;
+  ErrorInfo error = 6;
+  int64 update_time = 7;
+}
+
+// 错误信息
+message ErrorInfo {
+  string error_code = 1;
+  string error_message = 2;
+  string stack_trace = 3;
+}
+
+// 服务定义
+service AgentService {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc TaskStream(stream TaskStatusUpdate) returns (stream Task);
+  rpc RegisterAgent(RegisterRequest) returns (RegisterResponse);
+  rpc GetTask(TaskRequest) returns (Task);
+  rpc UpdateTaskStatus(TaskStatusUpdate) returns (StatusResponse);
+}
+
+// 注册请求
+message RegisterRequest {
+  string agent_id = 1;
+  AgentMetadata metadata = 2;
+  bytes public_key = 3;
+}
+
+// 注册响应
+message RegisterResponse {
+  string status = 1;
+  string server_id = 2;
+  bytes server_public_key = 3;
+  string api_token = 4;
+}
+
+// 任务请求
+message TaskRequest {
+  string task_id = 1;
+  string agent_id = 2;
+}
+
+// 状态响应
+message StatusResponse {
+  string status = 1;
+  string message = 2;
+}

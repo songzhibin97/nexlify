@@ -1,0 +1,8 @@
+server:
+  port: ":50051"
+  http_port: ":8080"  # 新增 HTTP 端口
+  database:
+    type: "mysql"
+    dsn: "root:123456@tcp(localhost:3306)/nexlify?charset=utf8mb4&parseTime=True&loc=Local"
+logging:
+  level: "info"
