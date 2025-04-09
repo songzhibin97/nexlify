@@ -26,6 +26,12 @@ proto:
 		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
 		$(PROTO_DIR)/agent.proto
 
+# 生成 TLS 证书（带 SAN）
+.PHONY: certs
+certs:
+	@echo "Generating self-signed certificate with SAN..."
+	@openssl req -x509 -newkey rsa:4096 -keyout config/key.pem -out config/cert.pem -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
 # 构建服务端
 .PHONY: build-server
 build-server:
@@ -55,6 +61,7 @@ run-agent: build-agent
 clean:
 	rm -rf bin/*
 	rm -f $(PROTO_DIR)/*.pb.go
+	rm -f config/cert.pem config/key.pem
 
 # 运行测试
 .PHONY: test
@@ -88,6 +95,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make tools       - Install necessary tools (protoc-gen-go, protoc-gen-go-grpc)"
 	@echo "  make proto       - Generate gRPC and Protocol Buffers code"
+	@echo "  make certs       - Generate self-signed TLS certificates with SAN"
 	@echo "  make build       - Build server and agent binaries"
 	@echo "  make build-server - Build server binary"
 	@echo "  make build-agent  - Build agent binary"

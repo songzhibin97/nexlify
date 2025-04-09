@@ -2,19 +2,23 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
+	"fmt"
+	"io/ioutil"
 	"os/exec"
 	"strings"
 	"time"
-
-	"github.com/spf13/viper"
 
 	"github.com/google/uuid"
 	"github.com/songzhibin97/nexlify/pkg/common/config"
 	"github.com/songzhibin97/nexlify/pkg/common/db"
 	"github.com/songzhibin97/nexlify/pkg/common/log"
 	pb "github.com/songzhibin97/nexlify/proto"
+	"github.com/spf13/viper"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -23,11 +27,25 @@ type Agent struct {
 	client             pb.AgentServiceClient
 	db                 *db.DB
 	agentID            string
-	supportedTaskTypes []string // 新增：支持的任务类型
+	supportedTaskTypes []string
+	token              string // 新增字段用于存储 API Token
 }
 
 func NewAgent(serverAddr string, db *db.DB, agentID string, supportedTaskTypes []string) (*Agent, error) {
-	conn, err := grpc.Dial(serverAddr, grpc.WithInsecure())
+	// 加载服务器证书
+	certPool := x509.NewCertPool()
+	cert, err := ioutil.ReadFile("config/cert.pem")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read cert file: %v", err)
+	}
+	if !certPool.AppendCertsFromPEM(cert) {
+		return nil, fmt.Errorf("failed to append cert")
+	}
+	creds := credentials.NewTLS(&tls.Config{
+		RootCAs: certPool,
+	})
+
+	conn, err := grpc.Dial(serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +68,7 @@ func (a *Agent) Register() (string, error) {
 			Hostname:           "localhost",
 			Ip:                 "127.0.0.1",
 			Version:            "v1.0",
-			SupportedTaskTypes: a.supportedTaskTypes, // 声明支持的任务类型
+			SupportedTaskTypes: a.supportedTaskTypes,
 		},
 	})
 	if err != nil {
@@ -63,6 +81,7 @@ func (a *Agent) Register() (string, error) {
 func (a *Agent) Heartbeat(token string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	ctx = metadata.AppendToOutgoingContext(ctx, "api_token", token)
 
 	_, err := a.client.Heartbeat(ctx, &pb.HeartbeatRequest{
 		AgentId:   a.agentID,
@@ -98,19 +117,33 @@ func (a *Agent) TaskStream(stream pb.AgentService_TaskStreamClient) error {
 		}
 		log.Info("Sent RUNNING status", "agent_id", a.agentID, "task_id", task.TaskId)
 
-		cmd := task.Parameters.Params["command"]
-		output, err := exec.Command("sh", "-c", cmd).Output()
+		// 任务执行隔离
+		var output []byte
+		var execErr error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					execErr = fmt.Errorf("task panicked: %v", r)
+				}
+			}()
+			cmd := task.Parameters.Params["command"]
+			output, execErr = exec.Command("sh", "-c", cmd).Output()
+		}()
+		<-done
+
 		status := "COMPLETED"
 		message := "Task completed"
 		progress := int32(100)
 		var errorInfo *pb.ErrorInfo
-		if err != nil {
+		if execErr != nil {
 			status = "FAILED"
-			message = "Task failed"
+			message = "Task failed: " + execErr.Error()
 			progress = 0
 			errorInfo = &pb.ErrorInfo{
 				ErrorCode:    "EXEC_ERROR",
-				ErrorMessage: err.Error(),
+				ErrorMessage: execErr.Error(),
 			}
 		}
 
@@ -134,8 +167,7 @@ func (a *Agent) TaskStream(stream pb.AgentService_TaskStreamClient) error {
 func (a *Agent) RunTaskStream() {
 	for {
 		ctx := context.Background()
-		md := metadata.Pairs("agent_id", a.agentID)
-		ctx = metadata.NewOutgoingContext(ctx, md)
+		ctx = metadata.AppendToOutgoingContext(ctx, "api_token", a.token)
 		stream, err := a.client.TaskStream(ctx)
 		if err != nil {
 			log.Error("Failed to start task stream", "agent_id", a.agentID, "error", err)
@@ -201,6 +233,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to register agent", "error", err)
 	}
+	agent.token = token
 	log.Info("Registered with token", "agent_id", agent.agentID, "token", token)
 
 	go agent.RunTaskStream()

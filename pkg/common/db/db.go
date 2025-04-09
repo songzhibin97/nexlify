@@ -1,6 +1,8 @@
 package db
 
 import (
+	"time"
+
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -28,6 +30,11 @@ func NewDB(cfg *config.DBConfig) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// 配置连接池
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(time.Hour)
 
 	if err := db.Ping(); err != nil {
 		return nil, err
@@ -75,7 +82,8 @@ func initSchema(db *sqlx.DB, dbType string) error {
 			timeout_seconds INT DEFAULT 0,
 			retry_count INT DEFAULT 0,
 			max_retries INT DEFAULT 0,
-			assigned_agent_id VARCHAR(255) DEFAULT NULL -- 新增：记录分配的 Agent
+			assigned_agent_id VARCHAR(255) DEFAULT NULL,
+			version INT DEFAULT 0
 		)`
 	case "postgres":
 		agentsSchema = `
@@ -107,7 +115,8 @@ func initSchema(db *sqlx.DB, dbType string) error {
 			timeout_seconds INTEGER DEFAULT 0,
 			retry_count INTEGER DEFAULT 0,
 			max_retries INTEGER DEFAULT 0,
-			assigned_agent_id VARCHAR(255) DEFAULT NULL -- 新增：记录分配的 Agent
+			assigned_agent_id VARCHAR(255) DEFAULT NULL,
+			version INTEGER DEFAULT 0
 		)`
 	}
 

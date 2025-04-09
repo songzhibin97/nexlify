@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songzhibin97/nexlify/pkg/common/db"
 	"github.com/songzhibin97/nexlify/pkg/common/log"
+	"github.com/songzhibin97/nexlify/pkg/server/agent"
 	"github.com/songzhibin97/nexlify/pkg/server/task"
 	pb "github.com/songzhibin97/nexlify/proto"
 )
@@ -21,7 +22,7 @@ type TaskRequest struct {
 	ScheduledAt    *int64            `json:"scheduled_at"`
 	Priority       *int              `json:"priority"`
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
-	MaxRetries     *int              `json:"max_retries"` // 新增字段
+	MaxRetries     *int              `json:"max_retries"`
 }
 
 type TaskResponse struct {
@@ -37,8 +38,8 @@ type TaskResponse struct {
 	ScheduledAt    *int64            `json:"scheduled_at"`
 	Priority       int               `json:"priority"`
 	TimeoutSeconds int32             `json:"timeout_seconds"`
-	RetryCount     int               `json:"retry_count"` // 新增字段
-	MaxRetries     int               `json:"max_retries"` // 新增字段
+	RetryCount     int               `json:"retry_count"`
+	MaxRetries     int               `json:"max_retries"`
 }
 
 type APIHandler struct {
@@ -48,6 +49,18 @@ type APIHandler struct {
 
 func NewAPIHandler(taskMgr *task.TaskManager, db *db.DB) *APIHandler {
 	return &APIHandler{taskMgr: taskMgr, db: db}
+}
+
+func AuthMiddleware(agentMgr *agent.AgentManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.GetHeader("Authorization")
+		if token == "" || !agentMgr.ValidateToken(token) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func (h *APIHandler) SubmitTask(c *gin.Context) {
@@ -94,7 +107,7 @@ func (h *APIHandler) SubmitTask(c *gin.Context) {
 		},
 		Priority:       int32(priority),
 		TimeoutSeconds: timeout,
-		MaxRetries:     int32(maxRetries), // 添加到 task 中
+		MaxRetries:     int32(maxRetries),
 		Schedule: &pb.TaskSchedule{
 			ScheduleType: "IMMEDIATE",
 			ScheduledAt:  0,
@@ -318,11 +331,12 @@ func (h *APIHandler) GetTaskList(c *gin.Context) {
 	})
 }
 
-func StartHTTPServer(port string, taskMgr *task.TaskManager, db *db.DB) {
+func StartHTTPServer(port string, taskMgr *task.TaskManager, db *db.DB, agentMgr *agent.AgentManager) {
 	r := gin.Default()
 	handler := NewAPIHandler(taskMgr, db)
 
 	api := r.Group("/api/v1")
+	api.Use(AuthMiddleware(agentMgr))
 	{
 		api.POST("/tasks", handler.SubmitTask)
 		api.GET("/tasks/:task_id", handler.GetTask)

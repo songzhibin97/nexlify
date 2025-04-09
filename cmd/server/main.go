@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"time"
 
@@ -13,6 +14,10 @@ import (
 	"github.com/songzhibin97/nexlify/pkg/server/task"
 	pb "github.com/songzhibin97/nexlify/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type agentServer struct {
@@ -23,7 +28,9 @@ type agentServer struct {
 
 func (s *agentServer) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
 	log.Info("Heartbeat received", "agent_id", req.AgentId)
-	s.agentMgr.Heartbeat(req.AgentId)
+	if err := s.agentMgr.Heartbeat(req.AgentId); err != nil {
+		return nil, err
+	}
 	return &pb.HeartbeatResponse{
 		ServerId:   "server-001",
 		ServerTime: time.Now().Unix(),
@@ -42,6 +49,30 @@ func (s *agentServer) RegisterAgent(ctx context.Context, req *pb.RegisterRequest
 
 func (s *agentServer) TaskStream(stream pb.AgentService_TaskStreamServer) error {
 	return s.taskMgr.StreamTasks(stream)
+}
+
+// UnaryInterceptor 验证 API Token，豁免 RegisterAgent 方法
+func UnaryInterceptor(agentMgr *agent.AgentManager) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		log.Info("Incoming gRPC method", "method", info.FullMethod)
+
+		// 豁免 RegisterAgent 方法，修正包名为 proto
+		if info.FullMethod == "/proto.AgentService/RegisterAgent" {
+			log.Info("RegisterAgent method, skipping token validation")
+			return handler(ctx, req)
+		}
+
+		// 其他方法需要验证 API Token
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok || len(md.Get("api_token")) == 0 {
+			return nil, status.Errorf(codes.Unauthenticated, "Missing API token")
+		}
+		token := md.Get("api_token")[0]
+		if !agentMgr.ValidateToken(token) {
+			return nil, status.Errorf(codes.Unauthenticated, "Invalid API token")
+		}
+		return handler(ctx, req)
+	}
 }
 
 func main() {
@@ -63,8 +94,18 @@ func main() {
 		log.Fatal("Failed to listen", "port", cfg.Port, "error", err)
 	}
 
-	s := grpc.NewServer()
+	// 加载 TLS 证书
+	cert, err := tls.LoadX509KeyPair("config/cert.pem", "config/key.pem")
+	if err != nil {
+		log.Fatal("Failed to load TLS credentials", "error", err)
+	}
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.NoClientCert,
+	})
+
 	agentMgr := agent.NewAgentManager(db)
+	s := grpc.NewServer(grpc.Creds(creds), grpc.UnaryInterceptor(UnaryInterceptor(agentMgr)))
 	taskMgr := task.NewTaskManager(db, agentMgr)
 
 	pb.RegisterAgentServiceServer(s, &agentServer{
@@ -79,9 +120,8 @@ func main() {
 		}
 	}()
 
-	go api.StartHTTPServer(cfg.HTTPPort, taskMgr, db)
+	go api.StartHTTPServer(cfg.HTTPPort, taskMgr, db, agentMgr)
 
-	// 优雅关闭
 	defer func() {
 		agentMgr.Stop()
 		taskMgr.Stop()
