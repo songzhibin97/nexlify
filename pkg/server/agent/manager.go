@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/songzhibin97/nexlify/pkg/common/config"
+
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
@@ -20,6 +22,7 @@ type AgentManager struct {
 	agents sync.Map // map[string]*AgentInfo
 	db     *db.DB
 	stopCh chan struct{}
+	cfg    *config.ServerConfig
 }
 
 type AgentInfo struct {
@@ -32,11 +35,12 @@ type AgentInfo struct {
 	HeartbeatFailures  int
 }
 
-func NewAgentManager(db *db.DB) *AgentManager {
+func NewAgentManager(db *db.DB, cfg *config.ServerConfig) *AgentManager {
 	mgr := &AgentManager{
 		agents: sync.Map{},
 		db:     db,
 		stopCh: make(chan struct{}),
+		cfg:    cfg,
 	}
 	go mgr.checkAgentStatus()
 	return mgr
@@ -124,7 +128,6 @@ func (m *AgentManager) ValidateToken(token string) bool {
 	return valid
 }
 
-// 新增方法：根据 api_token 获取 agent_id
 func (m *AgentManager) GetAgentIDByToken(token string) (string, error) {
 	var agentID string
 	var found bool
@@ -144,10 +147,11 @@ func (m *AgentManager) GetAgentIDByToken(token string) (string, error) {
 }
 
 func (m *AgentManager) GetActiveAgents() []string {
+
 	var activeAgents []string
 	m.agents.Range(func(key, value interface{}) bool {
 		agentInfo := value.(*AgentInfo)
-		if time.Since(agentInfo.LastHeartbeat) < 60*time.Second {
+		if time.Since(agentInfo.LastHeartbeat) < time.Duration(m.cfg.Agent.ActiveTimeout)*time.Second {
 			activeAgents = append(activeAgents, agentInfo.AgentID)
 		}
 		return true
@@ -156,10 +160,11 @@ func (m *AgentManager) GetActiveAgents() []string {
 }
 
 func (m *AgentManager) GetAgentsForTaskType(taskType string) []string {
+
 	var matchingAgents []string
 	m.agents.Range(func(key, value interface{}) bool {
 		agentInfo := value.(*AgentInfo)
-		if time.Since(agentInfo.LastHeartbeat) < 60*time.Second {
+		if time.Since(agentInfo.LastHeartbeat) < time.Duration(m.cfg.Agent.ActiveTimeout)*time.Second {
 			for _, supportedType := range agentInfo.SupportedTaskTypes {
 				if supportedType == taskType {
 					matchingAgents = append(matchingAgents, agentInfo.AgentID)
@@ -173,14 +178,11 @@ func (m *AgentManager) GetAgentsForTaskType(taskType string) []string {
 }
 
 func (m *AgentManager) checkAgentStatus() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	const maxFailures = 3
+	ticker := time.NewTicker(time.Duration(m.cfg.Agent.CheckInterval) * time.Second)
 
 	for range ticker.C {
 		now := time.Now().Unix()
-		timeoutThreshold := now - 60
+		timeoutThreshold := now - int64(m.cfg.Agent.ActiveTimeout)
 
 		var query string
 		if m.db.Type == "mysql" {
@@ -248,7 +250,7 @@ func (m *AgentManager) checkAgentStatus() {
                 UPDATE agents 
                 SET status = 'OFFLINE', updated_at = ?, heartbeat_failures = 0 
                 WHERE agent_id IN (?) AND heartbeat_failures >= ? AND status = 'ONLINE'`
-				offlineQuery, args, err = sqlx.In(offlineQuery, now, agents, maxFailures)
+				offlineQuery, args, err = sqlx.In(offlineQuery, now, agents, m.cfg.Agent.MaxHeartbeatFailures)
 				if err != nil {
 					log.Error("Failed to build IN query for offline", "error", err)
 					return
@@ -258,7 +260,7 @@ func (m *AgentManager) checkAgentStatus() {
                 UPDATE agents 
                 SET status = 'OFFLINE', updated_at = $1, heartbeat_failures = 0 
                 WHERE agent_id = ANY($2) AND heartbeat_failures >= $3 AND status = 'ONLINE'`
-				args = []interface{}{now, pq.Array(agents), maxFailures}
+				args = []interface{}{now, pq.Array(agents), m.cfg.Agent.MaxHeartbeatFailures}
 			}
 
 			result, err := tx.Exec(offlineQuery, args...)

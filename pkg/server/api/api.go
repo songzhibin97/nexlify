@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/songzhibin97/nexlify/pkg/common/config"
+
 	"github.com/gin-gonic/gin"
 	"github.com/songzhibin97/nexlify/pkg/common/db"
 	"github.com/songzhibin97/nexlify/pkg/common/log"
@@ -64,6 +66,13 @@ func AuthMiddleware(agentMgr *agent.AgentManager) gin.HandlerFunc {
 	}
 }
 func (h *APIHandler) SubmitTask(c *gin.Context) {
+	cfg, err := config.LoadServerConfig()
+	if err != nil {
+		log.Error("Failed to load config in SubmitTask", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load configuration"})
+		return
+	}
+
 	var req TaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		log.Error("Failed to bind task request", "error", err)
@@ -78,9 +87,9 @@ func (h *APIHandler) SubmitTask(c *gin.Context) {
 		return
 	}
 
-	priority := 5
+	priority := cfg.Task.DefaultPriority
 	if req.Priority != nil {
-		if *req.Priority < 1 || *req.Priority > 10 {
+		if *req.Priority < cfg.Task.MinPriority || *req.Priority > cfg.Task.MaxPriority {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Priority must be between 1 and 10"})
 			return
 		}

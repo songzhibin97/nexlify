@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/songzhibin97/nexlify/pkg/common/config"
+
 	"github.com/songzhibin97/nexlify/pkg/common/db"
 	"github.com/songzhibin97/nexlify/pkg/common/log"
 	"github.com/songzhibin97/nexlify/pkg/server/agent"
@@ -72,6 +74,12 @@ func (m *TaskManager) AddTask(task *pb.Task, scheduledAt *int64, priority int) {
 }
 
 func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error {
+	cfg, err := config.LoadServerConfig()
+	if err != nil {
+		log.Error("Failed to load config in StreamTasks", "error", err)
+		return err
+	}
+
 	md, ok := metadata.FromIncomingContext(stream.Context())
 	agentID := "unknown"
 	if ok {
@@ -86,8 +94,8 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 
 	lastSkippedTask := ""
 	lastLogTime := time.Now()
-	backoff := 1 * time.Second
-	maxBackoff := 10 * time.Second
+	backoff := time.Duration(cfg.Task.InitialBackoff) * time.Second
+	maxBackoff := time.Duration(cfg.Task.MaxBackoff) * time.Second
 
 	for {
 		var task struct {
@@ -157,7 +165,7 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 				lastSkippedTask = task.TaskID
 				lastLogTime = time.Now()
 			}
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Duration(cfg.Task.InitialBackoff) * time.Second)
 			continue
 		}
 
@@ -210,7 +218,7 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 
 		timeout := time.Duration(task.Timeout) * time.Second
 		if timeout == 0 {
-			timeout = 30 * time.Second
+			timeout = time.Duration(cfg.Task.DefaultTimeout) * time.Second
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
@@ -335,7 +343,12 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 }
 
 func (m *TaskManager) scheduleTasks() {
-	ticker := time.NewTicker(1 * time.Second)
+	cfg, err := config.LoadServerConfig()
+	if err != nil {
+		log.Fatal("Failed to load config in scheduleTasks", "error", err)
+	}
+	ticker := time.NewTicker(time.Duration(cfg.Task.ScheduleInterval) * time.Second)
+
 	defer ticker.Stop()
 
 	for {

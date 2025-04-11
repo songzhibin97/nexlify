@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/songzhibin97/nexlify/pkg/common/config"
-	"github.com/songzhibin97/nexlify/pkg/common/db"
 	"github.com/songzhibin97/nexlify/pkg/common/log"
 	pb "github.com/songzhibin97/nexlify/proto"
 	"github.com/spf13/viper"
@@ -25,13 +24,12 @@ import (
 type Agent struct {
 	conn               *grpc.ClientConn
 	client             pb.AgentServiceClient
-	db                 *db.DB
 	agentID            string
 	supportedTaskTypes []string
 	token              string // 新增字段用于存储 API Token
 }
 
-func NewAgent(serverAddr string, db *db.DB, agentID string, supportedTaskTypes []string) (*Agent, error) {
+func NewAgent(serverAddr string, agentID string, supportedTaskTypes []string) (*Agent, error) {
 	// 加载服务器证书
 	certPool := x509.NewCertPool()
 	cert, err := ioutil.ReadFile("config/cert.pem")
@@ -52,14 +50,17 @@ func NewAgent(serverAddr string, db *db.DB, agentID string, supportedTaskTypes [
 	return &Agent{
 		conn:               conn,
 		client:             pb.NewAgentServiceClient(conn),
-		db:                 db,
 		agentID:            agentID,
 		supportedTaskTypes: supportedTaskTypes,
 	}, nil
 }
 
 func (a *Agent) Register() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cfg, err := config.LoadAgentConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeouts.RegisterTimeout)*time.Second)
 	defer cancel()
 
 	resp, err := a.client.RegisterAgent(ctx, &pb.RegisterRequest{
@@ -79,11 +80,16 @@ func (a *Agent) Register() (string, error) {
 }
 
 func (a *Agent) Heartbeat(token string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cfg, err := config.LoadAgentConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeouts.HeartbeatTimeout)*time.Second)
 	defer cancel()
+
 	ctx = metadata.AppendToOutgoingContext(ctx, "api_token", token)
 
-	_, err := a.client.Heartbeat(ctx, &pb.HeartbeatRequest{
+	_, err = a.client.Heartbeat(ctx, &pb.HeartbeatRequest{
 		AgentId:   a.agentID,
 		Timestamp: time.Now().Unix(),
 	})
@@ -218,13 +224,7 @@ func main() {
 
 	supportedTaskTypes := strings.Split(*supportedTypesFlag, ",")
 
-	db, err := db.NewDB(&cfg.Database)
-	if err != nil {
-		log.Fatal("Failed to initialize database", "error", err)
-	}
-	defer db.Close()
-
-	agent, err := NewAgent(cfg.ServerAddr, db, agentID, supportedTaskTypes)
+	agent, err := NewAgent(cfg.ServerAddr, agentID, supportedTaskTypes)
 	if err != nil {
 		log.Fatal("Failed to create agent", "error", err)
 	}

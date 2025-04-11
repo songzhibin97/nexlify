@@ -104,7 +104,7 @@ func main() {
 		ClientAuth:   tls.NoClientCert,
 	})
 
-	agentMgr := agent.NewAgentManager(db)
+	agentMgr := agent.NewAgentManager(db, cfg)
 	s := grpc.NewServer(grpc.Creds(creds), grpc.UnaryInterceptor(UnaryInterceptor(agentMgr)))
 	taskMgr := task.NewTaskManager(db, agentMgr)
 

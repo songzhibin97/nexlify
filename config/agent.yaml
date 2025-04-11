@@ -1,9 +1,9 @@
 agent:
     agent_id: 5c876cc4-863b-45ab-90cf-995630a97546
-    database:
-        dsn: root:123456@tcp(localhost:3306)/nexlify?charset=utf8mb4&parseTime=True&loc=Local
-        type: mysql
     heartbeat_interval: 30
     server_addr: localhost:50051
+    timeouts:
+        register_timeout: 5
+        heartbeat_timeout: 5
 logging:
     level: info

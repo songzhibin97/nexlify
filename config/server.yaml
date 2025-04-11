@@ -1,8 +1,24 @@
 server:
   port: ":50051"
-  http_port: ":8080"  # 新增 HTTP 端口
+  http_port: ":8080"
   database:
     type: "mysql"
     dsn: "root:123456@tcp(localhost:3306)/nexlify?charset=utf8mb4&parseTime=True&loc=Local"
+    max_open_conns: 50
+    max_idle_conns: 10
+    conn_max_lifetime: 3600  # 1 hour in seconds
+  agent:
+    active_timeout: 60       # Seconds for agent to be considered active
+    check_interval: 30       # Seconds between agent status checks
+    max_heartbeat_failures: 3
+  task:
+    default_timeout: 30      # Default task timeout in seconds
+    initial_backoff: 1       # Initial backoff for task stream in seconds
+    max_backoff: 10          # Max backoff for task stream in seconds
+    log_suppression: 5       # Log suppression interval in seconds
+    schedule_interval: 1     # Task scheduling check interval in seconds
+    default_priority: 5
+    min_priority: 1
+    max_priority: 10
 logging:
   level: "info"

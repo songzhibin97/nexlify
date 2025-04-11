@@ -31,9 +31,9 @@ func NewDB(cfg *config.DBConfig) (*DB, error) {
 		return nil, err
 	}
 
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(time.Hour)
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetime) * time.Second)
 
 	if err := db.Ping(); err != nil {
 		return nil, err
