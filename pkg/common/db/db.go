@@ -31,7 +31,6 @@ func NewDB(cfg *config.DBConfig) (*DB, error) {
 		return nil, err
 	}
 
-	// 配置连接池
 	db.SetMaxOpenConns(50)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(time.Hour)
@@ -64,7 +63,8 @@ func initSchema(db *sqlx.DB, dbType string) error {
 			updated_at BIGINT DEFAULT NULL,
 			last_heartbeat BIGINT DEFAULT NULL,
 			status VARCHAR(50) DEFAULT 'ONLINE',
-			supported_task_types TEXT
+			supported_task_types TEXT,
+			heartbeat_failures INT DEFAULT 0  
 		)`
 		tasksSchema = `
 		CREATE TABLE IF NOT EXISTS tasks (
@@ -97,7 +97,8 @@ func initSchema(db *sqlx.DB, dbType string) error {
 			updated_at BIGINT DEFAULT NULL,
 			last_heartbeat BIGINT DEFAULT NULL,
 			status VARCHAR(50) DEFAULT 'ONLINE',
-			supported_task_types TEXT
+			supported_task_types TEXT,
+			heartbeat_failures INTEGER DEFAULT 0  
 		)`
 		tasksSchema = `
 		CREATE TABLE IF NOT EXISTS tasks (

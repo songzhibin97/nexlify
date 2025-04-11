@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -62,12 +63,18 @@ func AuthMiddleware(agentMgr *agent.AgentManager) gin.HandlerFunc {
 		c.Next()
 	}
 }
-
 func (h *APIHandler) SubmitTask(c *gin.Context) {
 	var req TaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		log.Error("Failed to bind task request", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
+		return
+	}
+
+	// 规范化任务类型（小写，去空格），但不验证白名单
+	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
+	if req.TaskType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Task type cannot be empty"})
 		return
 	}
 
@@ -122,7 +129,7 @@ func (h *APIHandler) SubmitTask(c *gin.Context) {
 	}
 
 	h.taskMgr.AddTask(task, req.ScheduledAt, priority)
-	log.Info("Task submitted via API", "task_id", req.TaskID, "scheduled_at", req.ScheduledAt, "priority", priority, "timeout_seconds", timeout, "max_retries", maxRetries)
+	log.Info("Task submitted via API", "task_id", req.TaskID, "task_type", req.TaskType, "scheduled_at", req.ScheduledAt, "priority", priority, "timeout_seconds", timeout, "max_retries", maxRetries)
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"task_id": req.TaskID,

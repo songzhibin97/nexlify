@@ -72,14 +72,11 @@ func (m *TaskManager) AddTask(task *pb.Task, scheduledAt *int64, priority int) {
 }
 
 func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error {
-	// 从上下文提取 metadata
 	md, ok := metadata.FromIncomingContext(stream.Context())
 	agentID := "unknown"
 	if ok {
-		// 从 metadata 中获取 api_token
 		if tokens := md.Get("api_token"); len(tokens) > 0 {
 			token := tokens[0]
-			// 使用 AgentManager 的 GetAgentIDByToken 获取 agent_id
 			if id, err := m.agentMgr.GetAgentIDByToken(token); err == nil {
 				agentID = id
 			}
@@ -89,6 +86,8 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 
 	lastSkippedTask := ""
 	lastLogTime := time.Now()
+	backoff := 1 * time.Second
+	maxBackoff := 10 * time.Second
 
 	for {
 		var task struct {
@@ -105,20 +104,20 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 		now := time.Now().Unix()
 		if m.db.Type == "mysql" {
 			query = `
-			SELECT task_id, task_type, parameters, priority, timeout_seconds, retry_count, max_retries, version
-			FROM tasks 
-			WHERE status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= ?)
-			ORDER BY priority DESC, created_at ASC
-			LIMIT 1 
-			FOR UPDATE`
+            SELECT task_id, task_type, parameters, priority, timeout_seconds, retry_count, max_retries, version
+            FROM tasks 
+            WHERE status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= ?)
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1 
+            FOR UPDATE`
 		} else if m.db.Type == "postgres" {
 			query = `
-			SELECT task_id, task_type, parameters, priority, timeout_seconds, retry_count, max_retries, version
-			FROM tasks 
-			WHERE status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= $1)
-			ORDER BY priority DESC, created_at ASC
-			LIMIT 1 
-			FOR UPDATE`
+            SELECT task_id, task_type, parameters, priority, timeout_seconds, retry_count, max_retries, version
+            FROM tasks 
+            WHERE status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= $1)
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1 
+            FOR UPDATE`
 		}
 
 		tx, err := m.db.Beginx()
@@ -131,12 +130,17 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 		if err != nil {
 			tx.Rollback()
 			if err == sql.ErrNoRows {
-				time.Sleep(1 * time.Second)
+				time.Sleep(backoff)
+				backoff = time.Duration(float64(backoff) * 1.5)
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 				continue
 			}
 			log.Error("Failed to fetch pending task", "agent_id", agentID, "error", err)
 			return err
 		}
+		backoff = 1 * time.Second
 
 		supportedAgents := m.agentMgr.GetAgentsForTaskType(task.TaskType)
 		taskSupported := false
@@ -160,14 +164,14 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 		var updateQuery string
 		if m.db.Type == "mysql" {
 			updateQuery = `
-			UPDATE tasks 
-			SET status = ?, updated_at = ?, assigned_agent_id = ?, version = version + 1
-			WHERE task_id = ? AND status = 'PENDING' AND version = ?`
+            UPDATE tasks 
+            SET status = ?, updated_at = ?, assigned_agent_id = ?, version = version + 1
+            WHERE task_id = ? AND status = 'PENDING' AND version = ?`
 		} else if m.db.Type == "postgres" {
 			updateQuery = `
-			UPDATE tasks 
-			SET status = $1, updated_at = $2, assigned_agent_id = $3, version = version + 1
-			WHERE task_id = $4 AND status = 'PENDING' AND version = $5`
+            UPDATE tasks 
+            SET status = $1, updated_at = $2, assigned_agent_id = $3, version = version + 1
+            WHERE task_id = $4 AND status = 'PENDING' AND version = $5`
 		}
 		result, err := tx.Exec(updateQuery, "RUNNING", time.Now().Unix(), agentID, task.TaskID, task.Version)
 		if err != nil {
@@ -176,13 +180,9 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 			continue
 		}
 		rowsAffected, err := result.RowsAffected()
-		if err != nil {
+		if err != nil || rowsAffected == 0 {
 			tx.Rollback()
-			continue
-		}
-		if rowsAffected == 0 {
-			tx.Rollback()
-			log.Warn("Task already processed or version mismatch", "agent_id", agentID, "task_id", task.TaskID)
+			log.Warn("Task already processed or version mismatch", "agent_id", agentID, "task_id", task.TaskID, "rows_affected", rowsAffected)
 			continue
 		}
 
@@ -223,37 +223,43 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 				var newStatus string
 				var newMessage string
 				var newRetryCount int
+				var scheduledAt *int64
 
 				tx, _ := m.db.Beginx()
-				if task.RetryCount < task.MaxRetries {
+				agentInfo, ok := m.agentMgr.GetAgentInfo(agentID)
+				agentOnline := ok && time.Since(agentInfo.LastHeartbeat) < 60*time.Second
+
+				if task.RetryCount < task.MaxRetries && !agentOnline {
 					newStatus = "PENDING"
-					newMessage = "Task timed out, retrying"
+					newMessage = "Task timed out, scheduling retry"
 					newRetryCount = task.RetryCount + 1
+					retryDelay := time.Now().Unix() + int64(task.Timeout*2)
+					scheduledAt = &retryDelay
 				} else {
 					newStatus = "FAILED"
-					newMessage = "Task timed out, max retries reached"
+					newMessage = "Task timed out, max retries reached or agent still online"
 					newRetryCount = task.RetryCount
 				}
 
 				if m.db.Type == "mysql" {
 					timeoutQuery = `
-					UPDATE tasks 
-					SET status = ?, progress = ?, message = ?, retry_count = ?, updated_at = ?, assigned_agent_id = NULL, version = version + 1
-					WHERE task_id = ? AND version = ?`
-					_, err = tx.Exec(timeoutQuery, newStatus, 0, newMessage, newRetryCount, time.Now().Unix(), task.TaskID, task.Version+1)
+                    UPDATE tasks 
+                    SET status = ?, progress = ?, message = ?, retry_count = ?, updated_at = ?, scheduled_at = ?, assigned_agent_id = NULL, version = version + 1
+                    WHERE task_id = ? AND version = ?`
+					_, err = tx.Exec(timeoutQuery, newStatus, 0, newMessage, newRetryCount, time.Now().Unix(), scheduledAt, task.TaskID, task.Version+1)
 				} else if m.db.Type == "postgres" {
 					timeoutQuery = `
-					UPDATE tasks 
-					SET status = $1, progress = $2, message = $3, retry_count = $4, updated_at = $5, assigned_agent_id = NULL, version = version + 1
-					WHERE task_id = $6 AND version = $7`
-					_, err = tx.Exec(timeoutQuery, newStatus, 0, newMessage, newRetryCount, time.Now().Unix(), task.TaskID, task.Version+1)
+                    UPDATE tasks 
+                    SET status = $1, progress = $2, message = $3, retry_count = $4, updated_at = $5, scheduled_at = $6, assigned_agent_id = NULL, version = version + 1
+                    WHERE task_id = $7 AND version = $8`
+					_, err = tx.Exec(timeoutQuery, newStatus, 0, newMessage, newRetryCount, time.Now().Unix(), scheduledAt, task.TaskID, task.Version+1)
 				}
 				if err != nil {
 					tx.Rollback()
 					log.Error("Failed to update task on timeout", "agent_id", agentID, "task_id", task.TaskID, "error", err)
 				} else {
 					tx.Commit()
-					log.Info("Task updated on timeout", "agent_id", agentID, "task_id", task.TaskID, "status", newStatus, "retry_count", newRetryCount)
+					log.Info("Task updated on timeout", "agent_id", agentID, "task_id", task.TaskID, "status", newStatus, "retry_count", newRetryCount, "scheduled_at", scheduledAt)
 				}
 				completed = true
 				cancel()
@@ -286,16 +292,16 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 				var statusQuery string
 				if m.db.Type == "mysql" {
 					statusQuery = `
-					UPDATE tasks 
-					SET status = ?, progress = ?, message = ?, result = ?, updated_at = ?, version = version + 1
-					WHERE task_id = ? AND version = ?`
+                    UPDATE tasks 
+                    SET status = ?, progress = ?, message = ?, result = ?, updated_at = ?, version = version + 1
+                    WHERE task_id = ? AND version = ?`
 					_, err = tx.Exec(statusQuery,
 						status.Status, status.Progress, status.Message, result, time.Now().Unix(), status.TaskId, task.Version+1)
 				} else if m.db.Type == "postgres" {
 					statusQuery = `
-					UPDATE tasks 
-					SET status = $1, progress = $2, message = $3, result = $4, updated_at = $5, version = version + 1
-					WHERE task_id = $6 AND version = $7`
+                    UPDATE tasks 
+                    SET status = $1, progress = $2, message = $3, result = $4, updated_at = $5, version = version + 1
+                    WHERE task_id = $6 AND version = $7`
 					_, err = tx.Exec(statusQuery,
 						status.Status, status.Progress, status.Message, result, time.Now().Unix(), status.TaskId, task.Version+1)
 				}
@@ -303,8 +309,15 @@ func (m *TaskManager) StreamTasks(stream pb.AgentService_TaskStreamServer) error
 					tx.Rollback()
 					log.Error("Failed to update task status in DB", "agent_id", agentID, "task_id", status.TaskId, "error", err)
 				} else {
-					tx.Commit()
-					log.Info("Task status updated in DB", "agent_id", agentID, "task_id", status.TaskId, "status", status.Status)
+					result, _ := tx.Exec(statusQuery, status.Status, status.Progress, status.Message, result, time.Now().Unix(), status.TaskId, task.Version+1)
+					rowsAffected, _ := result.RowsAffected()
+					if rowsAffected == 0 {
+						tx.Rollback()
+						log.Warn("Version conflict on status update", "agent_id", agentID, "task_id", status.TaskId)
+					} else {
+						tx.Commit()
+						log.Info("Task status updated in DB", "agent_id", agentID, "task_id", status.TaskId, "status", status.Status)
+					}
 				}
 
 				if status.Status == "COMPLETED" || status.Status == "FAILED" {
